@@ -89,6 +89,44 @@ def evaluate(config, model, overlap_hop = 512, verbose: bool = False):
         print('FINAL SCORE:', np.mean(final_score))
     return final_score
 
+def evaluate_ensemble(config, model, path, overlap_hop = 512, verbose: bool = False):
+    inputs = load_wav(path)
+    if config.n_chan == 1:
+        inputs = mono_chan(inputs)
+    elif config.n_chan == 3:
+        inputs = stereo_mono(inputs)
+    elif config.n_chan > 3:
+        inputs = random_merge_aug(config.n_chan)(inputs, None)
+
+    if config.model_type != 'se':
+        inputs = stft_filter(int(round(256 * 1000 / 16000)))(inputs)
+        inputs = complex_to_magphase(inputs)
+        inputs = magphase_to_mel(config.n_mels)(inputs)
+        inputs = minmax(inputs)
+        inputs = log_on_mel(inputs)
+    else:
+        # inputs = complex_to_magphase(inputs)
+        inputs = speech_enhancement_preprocess(inputs)
+
+    frame_len = inputs.shape[-2]
+    inputs = tf.signal.frame(inputs, config.n_frame, overlap_hop, pad_end=True, axis=-2)
+    inputs = tf.transpose(inputs, (1, 0, 2, 3))
+    preds = model.predict(inputs[..., :config.n_chan]) # [batch, time, class]
+
+    if config.model_type == 'se' and config.v == 9:
+        preds = preds[0]
+    
+    if config.v in label_downsample_model:
+        resolution = config.n_frame / preds.shape[-2]
+        preds = tf.keras.layers.UpSampling1D(resolution)(preds)
+        
+    preds = tf.transpose(preds, [2, 0, 1])
+    total_counts = tf.signal.overlap_and_add(tf.ones_like(preds), overlap_hop)[..., :frame_len]
+    preds = tf.signal.overlap_and_add(preds, overlap_hop)[..., :frame_len]
+    preds /= total_counts
+    preds = tf.transpose(preds, [1, 0])
+    return preds
+
 
 class Challenge_Metric:
     def __init__(self, sr=16000, hop=256) -> None:
